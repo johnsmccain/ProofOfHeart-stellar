@@ -785,10 +785,13 @@ impl ProofOfHeart {
         }
 
         bump_instance_ttl(&env);
-        set_revenue_claimed(&env, campaign_id, &contributor, already_claimed + claimable);
 
+        // Transfer tokens BEFORE updating state to prevent balance wipe on failed transfer
         let client = Self::token_client(&env);
         client.transfer(&env.current_contract_address(), &contributor, &claimable);
+
+        // Update state only after successful external interaction
+        set_revenue_claimed(&env, campaign_id, &contributor, already_claimed + claimable);
 
         env.events().publish(
             ("revenue_claimed", campaign_id, contributor.clone()),
@@ -1308,6 +1311,10 @@ impl ProofOfHeart {
         let _campaign = get_campaign_or_error(&env, campaign_id)?;
         bump_instance_ttl(&env);
         set_personal_cap(&env, campaign_id, &contributor, amount);
+        env.events().publish(
+            ("personal_cap_set", campaign_id, contributor.clone()),
+            amount,
+        );
         Ok(())
     }
 
@@ -1572,14 +1579,17 @@ impl ProofOfHeart {
             }
         }
 
-        // If we finished naturally (no scan cap hit), clear the cursor
-        if next_cursor == 0 && collected < limit {
-            next_cursor = 0;
-        }
-
         (campaigns, next_cursor)
     }
 
+    /// List campaigns in a specific category using exclusive-cursor semantics.
+    ///
+    /// # Arguments
+    /// * `start` - The last campaign ID already seen (exclusive cursor).
+    ///   - Pass `start = 0` for the first page.
+    ///   - Pass the last returned campaign ID as `start` for the next page.
+    ///
+    /// Caps the limit at LIST_MAX_LIMIT (50) to prevent pathological calls.
     pub fn get_campaigns_by_category(
         env: Env,
         category: Category,
@@ -1593,23 +1603,22 @@ impl ProofOfHeart {
 
         let ids = get_category_campaigns(&env, category);
         let total = ids.len();
-        if start >= total {
-            return campaigns;
-        }
+        let capped_limit = limit.min(LIST_MAX_LIMIT);
+        let mut collected = 0u32;
 
-        let end = if start + limit > total {
-            total
-        } else {
-            start + limit
-        };
-
-        let mut idx = start;
-        while idx < end {
-            let campaign_id = ids.get(idx).unwrap();
-            if let Some(campaign) = get_campaign(&env, campaign_id) {
-                campaigns.push_back(campaign);
+        // Use exclusive cursor semantics: iterate IDs looking for those > start
+        for idx in 0..total {
+            if collected >= capped_limit {
+                break;
             }
-            idx += 1;
+            let campaign_id = ids.get(idx).unwrap();
+            // Only include campaigns with ID > start (exclusive cursor)
+            if campaign_id > start {
+                if let Some(campaign) = get_campaign(&env, campaign_id) {
+                    campaigns.push_back(campaign);
+                    collected += 1;
+                }
+            }
         }
 
         campaigns
