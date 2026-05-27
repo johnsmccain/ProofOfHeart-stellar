@@ -1784,7 +1784,7 @@ impl ProofOfHeart {
         let admin = get_admin(&env);
         assert_admin(&env, &admin)?;
 
-        let campaign = get_campaign_or_error(&env, campaign_id)?;
+        let campaign: Campaign = get_campaign_or_error(&env, campaign_id)?;
         if !campaign.funds_withdrawn && !campaign.is_cancelled {
             return Err(Error::ValidationFailed);
         }

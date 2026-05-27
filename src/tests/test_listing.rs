@@ -265,3 +265,64 @@ fn test_creator_campaigns_listing_and_transfer() {
     assert_eq!(list2_after.len(), 1);
     assert_eq!(list2_after.get(0).unwrap().id, id1);
 }
+
+/// Verifies that list_active_campaigns correctly advances the cursor and returns
+/// all active campaigns when the majority of campaigns are cancelled (sparse distribution).
+///
+/// Scenario: 12 campaigns created, campaigns 1–10 cancelled, only 11 and 12 active.
+/// Paginating with page size 1 must return campaign 11 then 12 with no omissions,
+/// no duplicates, and a zero cursor after the final page.
+#[test]
+fn test_list_active_campaigns_sparse_active_distribution() {
+    let (env, _admin, creator, _c1, _c2, _token, _token_admin, client) = setup_env();
+
+    let total = 12u32;
+    let active_from = 11u32; // campaigns 11 and 12 are active; 1–10 are cancelled
+
+    for _ in 0..total {
+        client.create_campaign(&make_params(
+            creator.clone(),
+            String::from_str(&env, "Campaign"),
+            String::from_str(&env, "Desc"),
+            1000,
+            30,
+            Category::Learner,
+            false,
+            0,
+            0i128,
+        ));
+    }
+
+    for id in 1..active_from {
+        client.cancel_campaign(&id);
+    }
+
+    // Page 1: expect campaign 11, cursor should advance past it
+    let (page1, cursor1) = client.list_active_campaigns(&0, &1);
+    assert_eq!(page1.len(), 1);
+    assert_eq!(page1.get(0).unwrap().id, 11);
+    assert!(cursor1 > 0, "cursor must be non-zero when more results remain");
+
+    // Page 2: continue from cursor1, expect campaign 12
+    let (page2, cursor2) = client.list_active_campaigns(&cursor1.saturating_sub(1), &1);
+    assert_eq!(page2.len(), 1);
+    assert_eq!(page2.get(0).unwrap().id, 12);
+
+    // No duplicates across pages
+    assert_ne!(
+        page1.get(0).unwrap().id,
+        page2.get(0).unwrap().id,
+        "pages must not overlap"
+    );
+
+    // Final page: cursor must be zero (no more results)
+    let (page3, cursor3) = client.list_active_campaigns(&12, &1);
+    assert_eq!(page3.len(), 0);
+    assert_eq!(cursor3, 0);
+
+    // Full sweep with large limit returns exactly the two active campaigns
+    let (all, _) = client.list_active_campaigns(&0, &50);
+    assert_eq!(all.len(), 2);
+    assert_eq!(all.get(0).unwrap().id, 11);
+    assert_eq!(all.get(1).unwrap().id, 12);
+}
