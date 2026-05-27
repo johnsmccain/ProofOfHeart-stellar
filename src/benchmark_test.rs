@@ -110,7 +110,7 @@ fn test_get_campaigns_by_category_bucketed_pagination_budget() {
     for i in 0..601u32 {
         let params = CreateCampaignParams {
             creator: creator.clone(),
-            title: String::from_str(&env, &format!("Campaign {}", i)),
+            title: String::from_str(&env, "Campaign"),
             description: String::from_str(&env, "Benchmark campaign"),
             funding_goal: 1_000,
             duration_days: 30,
