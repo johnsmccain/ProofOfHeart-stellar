@@ -702,6 +702,7 @@ impl ProofOfHeart {
 
         bump_instance_ttl(&env);
         remove_contribution(&env, campaign_id, &contributor);
+        remove_lifetime_contribution(&env, campaign_id, &contributor);
         remove_revenue_claimed(&env, campaign_id, &contributor);
 
         // Decrement contributor count on full refund
@@ -730,6 +731,9 @@ impl ProofOfHeart {
 
         if amount <= 0 {
             return Err(Error::ValidationFailed);
+        }
+        if campaign.is_cancelled {
+            return Err(Error::CampaignNotActive);
         }
         require_revenue_sharing(&campaign, Error::RevenueSharingNotEnabled)?;
 
@@ -1024,7 +1028,10 @@ impl ProofOfHeart {
         for idx in 0..batch_size {
             if let Some(campaign_id) = campaign_ids.get(idx) {
                 match voting::admin_verify(&env, campaign_id) {
-                    Ok(()) => verified_count += 1,
+                    Ok(()) => {
+                        verified_count += 1;
+                        storage::extend_voting_state_ttl(&env, campaign_id);
+                    }
                     Err(e) => {
                         if first_error.is_none() {
                             first_error = Some(e);
@@ -1613,7 +1620,6 @@ impl ProofOfHeart {
         let mut active_campaigns = 0u32;
         let mut verified_campaigns = 0u32;
         let mut cancelled_campaigns = 0u32;
-        let mut total_amount_raised = 0i128;
 
         let mut id = 1u32;
         while id <= total_campaigns {
@@ -1627,7 +1633,6 @@ impl ProofOfHeart {
                 if campaign.is_cancelled {
                     cancelled_campaigns += 1;
                 }
-                total_amount_raised += campaign.amount_raised;
             }
             id += 1;
         }
@@ -1637,7 +1642,7 @@ impl ProofOfHeart {
             active_campaigns,
             verified_campaigns,
             cancelled_campaigns,
-            total_amount_raised,
+            total_amount_raised: get_total_raised_global(&env),
         }
     }
 

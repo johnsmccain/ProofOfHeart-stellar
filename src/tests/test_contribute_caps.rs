@@ -18,7 +18,7 @@ fn test_contribution_cap_persists_across_refund_recontribution_cycles() {
     client.cancel_campaign(&campaign_id);
     client.claim_refund(&campaign_id, &contributor1);
     assert_eq!(client.get_contribution(&campaign_id, &contributor1), 0);
-    assert_eq!(client.get_lifetime_contribution(&campaign_id, &contributor1), 900);
+    assert_eq!(client.get_lifetime_contribution(&campaign_id, &contributor1), 0);
 }
 
 #[test]

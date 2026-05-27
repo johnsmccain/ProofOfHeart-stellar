@@ -268,6 +268,12 @@ pub fn remove_contribution(env: &Env, campaign_id: u32, contributor: &Address) {
     env.storage().persistent().remove(&key);
 }
 
+/// Removes a contributor's lifetime contribution record.
+pub fn remove_lifetime_contribution(env: &Env, campaign_id: u32, contributor: &Address) {
+    let key = DataKey::LifetimeContribution(campaign_id, contributor.clone());
+    env.storage().persistent().remove(&key);
+}
+
 // ── Contributor count ───────────────────────────────────────────────────────────
 
 pub fn get_contributor_count(env: &Env, campaign_id: u32) -> u32 {
@@ -441,6 +447,22 @@ pub fn remove_voting_state(env: &Env, campaign_id: u32) {
     storage.remove(&DataKey::RejectVotes(campaign_id));
     storage.remove(&DataKey::ApproveWeight(campaign_id));
     storage.remove(&DataKey::RejectWeight(campaign_id));
+}
+
+/// Extends TTL on all voting state keys for a campaign.
+pub fn extend_voting_state_ttl(env: &Env, campaign_id: u32) {
+    let storage = env.storage().persistent();
+    let keys = [
+        DataKey::ApproveVotes(campaign_id),
+        DataKey::RejectVotes(campaign_id),
+        DataKey::ApproveWeight(campaign_id),
+        DataKey::RejectWeight(campaign_id),
+    ];
+    for key in keys {
+        if storage.has(&key) {
+            storage.extend_ttl(&key, BUMP_THRESHOLD, BUMP_AMOUNT);
+        }
+    }
 }
 
 /// Returns the minimum vote quorum setting, falling back to `default` if unset.

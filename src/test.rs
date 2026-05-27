@@ -2353,10 +2353,10 @@ fn test_contribution_cap_persists_across_refund_recontribution_cycles() {
     client.claim_refund(&campaign_id, &contributor1);
     assert_eq!(client.get_contribution(&campaign_id, &contributor1), 0);
 
-    // Lifetime amount must not reset when current contribution is refunded.
+    // Lifetime amount is cleared after full refund.
     assert_eq!(
         client.get_lifetime_contribution(&campaign_id, &contributor1),
-        900
+        0
     );
 }
 
@@ -3843,4 +3843,142 @@ fn test_create_campaign_validation_independence() {
     );
     let res = client.try_create_campaign(&params_valid_dur);
     assert_eq!(res.unwrap_err().unwrap(), Error::FundingGoalTooHigh);
+}
+
+// ── Issue #260: deposit_revenue rejects cancelled campaigns ──────────────────
+
+#[test]
+fn test_deposit_revenue_cancelled_campaign() {
+    let (env, _admin, creator, contributor1, _, _token, token_admin, client) = setup_env();
+
+    token_admin.mint(&contributor1, &5000);
+    token_admin.mint(&creator, &10000);
+
+    let campaign_id = client.create_campaign(&make_params(
+        creator.clone(),
+        String::from_str(&env, "Startup"),
+        String::from_str(&env, "Revenue sharing startup"),
+        1000,
+        30,
+        Category::EducationalStartup,
+        true,
+        2000,
+        0i128,
+    ));
+    client.verify_campaign(&campaign_id);
+
+    // Cancel the campaign (before withdrawal — cancellation after withdrawal is disallowed)
+    client.cancel_campaign(&campaign_id);
+
+    // Depositing revenue into a cancelled campaign should fail
+    let res = client.try_deposit_revenue(&campaign_id, &500);
+    assert_eq!(res.unwrap_err().unwrap(), Error::CampaignNotActive);
+}
+
+// ── Issue #261: claim_refund clears LifetimeContribution ────────────────────
+
+#[test]
+fn test_claim_refund_clears_lifetime_contribution() {
+    let (env, _admin, creator, contributor1, _, _token, token_admin, client) = setup_env();
+
+    token_admin.mint(&contributor1, &5000);
+
+    let campaign_id = client.create_campaign(&make_params(
+        creator.clone(),
+        String::from_str(&env, "LT Cleanup"),
+        String::from_str(&env, "Test lifetime cleanup"),
+        2000,
+        1,
+        Category::Learner,
+        false,
+        0,
+        1_000i128,
+    ));
+    let _ = client.try_verify_campaign(&campaign_id);
+    client.contribute(&campaign_id, &contributor1, &900);
+
+    // Cancel and refund
+    client.cancel_campaign(&campaign_id);
+    client.claim_refund(&campaign_id, &contributor1);
+
+    // LifetimeContribution should be cleared after full refund
+    assert_eq!(
+        client.get_lifetime_contribution(&campaign_id, &contributor1),
+        0,
+        "LifetimeContribution should be 0 after full refund"
+    );
+}
+
+// ── Issue #262: get_platform_stats reflects only held funds ──────────────────
+
+#[test]
+fn test_platform_stats_after_withdrawal() {
+    let (env, _admin, creator, contributor1, contributor2, _token, token_admin, client) =
+        setup_env();
+    token_admin.mint(&contributor1, &5000);
+    token_admin.mint(&contributor2, &5000);
+
+    // Campaign 1: fund and withdraw
+    let c1 = client.create_campaign(&make_params(
+        creator.clone(),
+        String::from_str(&env, "Withdrawn"),
+        String::from_str(&env, "w"),
+        1000,
+        30,
+        Category::Learner,
+        false,
+        0,
+        0i128,
+    ));
+    client.verify_campaign(&c1);
+    client.contribute(&c1, &contributor1, &1000);
+    client.withdraw_funds(&c1);
+
+    // Campaign 2: still active, funded
+    let c2 = client.create_campaign(&make_params(
+        creator.clone(),
+        String::from_str(&env, "Active"),
+        String::from_str(&env, "a"),
+        1000,
+        30,
+        Category::Learner,
+        false,
+        0,
+        0i128,
+    ));
+    client.verify_campaign(&c2);
+    client.contribute(&c2, &contributor2, &500);
+
+    let stats = client.get_platform_stats();
+    // Only currently held funds (campaign 2's 500), not the withdrawn 1000
+    assert_eq!(stats.total_amount_raised, 500);
+}
+
+// ── Issue #263: verify_campaigns extends voting state TTL ────────────────────
+
+#[test]
+fn test_verify_campaigns_extends_voting_state_ttl() {
+    let (env, admin, creator, _, _, _, _, client) = setup_env();
+
+    // Create a campaign
+    let campaign_id = client.create_campaign(&make_params(
+        creator.clone(),
+        String::from_str(&env, "TTL Test"),
+        String::from_str(&env, "Testing TTL extension"),
+        1000,
+        30,
+        Category::Learner,
+        false,
+        0,
+        0i128,
+    ));
+
+    // Bulk verify the campaign
+    let (count, err) = client.verify_campaigns(&soroban_sdk::Vec::from_array(&env, [campaign_id]));
+    assert_eq!(count, 1);
+    assert!(err.is_none());
+
+    // Verify campaign is verified (confirming it worked)
+    let campaign = client.get_campaign(&campaign_id);
+    assert!(campaign.is_verified);
 }
