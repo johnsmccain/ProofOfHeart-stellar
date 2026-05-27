@@ -1569,21 +1569,25 @@ impl ProofOfHeart {
         let mut current_id = start + 1;
         let mut next_cursor = 0u32;
 
-        while collected < capped_limit && current_id <= total_count {
+        while current_id <= total_count {
+            // Cap the scan to MAX_SCAN_WINDOW to prevent DoS
+            if current_id > start + MAX_SCAN_WINDOW {
+                next_cursor = current_id;
+                break;
+            }
+
             if let Some(campaign) = get_campaign(&env, current_id) {
                 if campaign.is_active && !campaign.is_cancelled {
                     campaigns.push_back(campaign);
                     collected += 1;
+                    if collected >= capped_limit {
+                        // Limit satisfied: set cursor so caller can continue
+                        next_cursor = current_id + 1;
+                        break;
+                    }
                 }
             }
             current_id += 1;
-
-            // Cap the scan to MAX_SCAN_WINDOW to prevent DoS
-            if current_id > start + MAX_SCAN_WINDOW {
-                // We hit the scan cap - set continuation cursor
-                next_cursor = current_id;
-                break;
-            }
         }
 
         (campaigns, next_cursor)
