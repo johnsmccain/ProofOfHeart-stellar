@@ -275,6 +275,7 @@ impl ProofOfHeart {
         let campaign = Campaign {
             id: count,
             creator: creator.clone(),
+            original_creator: creator.clone(),
             pending_creator: MaybePendingCreator::None,
             title: title.clone(),
             description,
@@ -297,9 +298,12 @@ impl ProofOfHeart {
         set_campaign_start_time(&env, count, env.ledger().timestamp());
         set_campaign_count(&env, count);
         set_revenue_pool(&env, count, 0);
-        let mut category_campaigns = get_category_campaigns(&env, category);
-        category_campaigns.push_back(count);
-        set_category_campaigns(&env, category, &category_campaigns);
+        let category_count = get_category_campaign_count(&env, category);
+        let bucket_idx = category_count / CATEGORY_CAMPAIGNS_BUCKET_SIZE;
+        let mut bucket = get_category_campaign_bucket(&env, category, bucket_idx);
+        bucket.push_back(count);
+        set_category_campaign_bucket(&env, category, bucket_idx, &bucket);
+        set_category_campaign_count(&env, category, category_count + 1);
 
         let creator_count = get_creator_campaign_count(&env, &creator);
         let bucket_idx = creator_count / CREATOR_CAMPAIGNS_BUCKET_SIZE;
@@ -348,7 +352,7 @@ impl ProofOfHeart {
         }
 
         require_active_campaign(&campaign)?;
-        if contributor == campaign.creator {
+        if contributor == campaign.creator || contributor == campaign.original_creator {
             return Err(Error::NotAuthorized);
         }
         if env.ledger().timestamp() > campaign.deadline {
@@ -842,7 +846,6 @@ impl ProofOfHeart {
             &claimable,
         );
 
-        // Update state only after successful external interaction
         set_creator_revenue_claimed(&env, campaign_id, already_claimed + claimable);
 
         env.events().publish(
@@ -1330,6 +1333,14 @@ impl ProofOfHeart {
         get_personal_cap(&env, campaign_id, &contributor).unwrap_or(0)
     }
 
+    /// Returns the reserve details for a campaign, if any.
+    pub fn get_campaign_reserve(
+        env: Env,
+        campaign_id: u32,
+    ) -> Option<CampaignReserve> {
+        storage::get_campaign_reserve(&env, campaign_id)
+    }
+
     /// Initiates transfer of admin privileges to a new address.
     ///
     /// # Authorization
@@ -1612,23 +1623,40 @@ impl ProofOfHeart {
             return campaigns;
         }
 
-        let ids = get_category_campaigns(&env, category);
-        let total = ids.len();
-        let capped_limit = limit.min(LIST_MAX_LIMIT);
-        let mut collected = 0u32;
+        let total = get_category_campaign_count(&env, category);
+        if start >= total {
+            return campaigns;
+        }
 
-        // Use exclusive cursor semantics: iterate IDs looking for those > start
-        for idx in 0..total {
-            if collected >= capped_limit {
-                break;
-            }
-            let campaign_id = ids.get(idx).unwrap();
-            // Only include campaigns with ID > start (exclusive cursor)
-            if campaign_id > start {
+        let end = if start + limit > total {
+            total
+        } else {
+            start + limit
+        };
+
+        let mut position = start;
+        while position < end {
+            let bucket_idx = position / CATEGORY_CAMPAIGNS_BUCKET_SIZE;
+            let bucket = get_category_campaign_bucket(&env, category, bucket_idx);
+            let bucket_start = bucket_idx * CATEGORY_CAMPAIGNS_BUCKET_SIZE;
+            let mut idx_in_bucket = position - bucket_start;
+
+            let bucket_len = bucket.len();
+            while idx_in_bucket < bucket_len && position < end {
+                let campaign_id = bucket.get(idx_in_bucket).unwrap();
                 if let Some(campaign) = get_campaign(&env, campaign_id) {
                     campaigns.push_back(campaign);
-                    collected += 1;
                 }
+                idx_in_bucket += 1;
+                position += 1;
+            }
+
+            if idx_in_bucket >= bucket_len {
+                position = if bucket_len == 0 {
+                    bucket_start + CATEGORY_CAMPAIGNS_BUCKET_SIZE
+                } else {
+                    bucket_start + bucket_len
+                };
             }
         }
 
@@ -1789,6 +1817,12 @@ impl ProofOfHeart {
             return Err(Error::ValidationFailed);
         }
 
+        // Reject an empty voter list — a no-op call would silently succeed while
+        // leaving HasVoted entries as orphans, leaking ledger storage.
+        if voters.is_empty() {
+            return Err(Error::ValidationFailed);
+        }
+
         remove_voting_state(&env, campaign_id);
         for voter in voters.iter() {
             remove_has_voted(&env, campaign_id, &voter);
@@ -1817,6 +1851,43 @@ impl ProofOfHeart {
 
         env.events()
             .publish(("campaign_transfer_cancelled", campaign_id), ());
+
+        Ok(())
+    }
+
+    /// Resumes a campaign that was auto-paused (e.g. due to anomaly detection).
+    ///
+    /// Either the campaign creator or the global admin may call this to lift the
+    /// contract-level pause and allow contributions to resume. An event is emitted
+    /// so indexers can track the recovery.
+    ///
+    /// # Arguments
+    /// * `campaign_id` - The ID of the campaign whose context triggered the pause.
+    /// * `caller` - The address of the creator or admin requesting the resume.
+    ///
+    /// # Errors
+    /// * `CampaignNotFound` - No campaign with the given ID.
+    /// * `NotAuthorized` - Caller is neither the campaign creator nor the admin.
+    /// * `CampaignNotActive` - Campaign is cancelled or already closed.
+    ///
+    /// # Authorization
+    /// Requires `caller.require_auth()`.
+    pub fn resume_campaign(env: Env, campaign_id: u32, caller: Address) -> Result<(), Error> {
+        caller.require_auth();
+
+        let campaign = get_campaign_or_error(&env, campaign_id)?;
+        require_active_campaign(&campaign)?;
+
+        let admin = get_admin(&env);
+        if caller != campaign.creator && caller != admin {
+            return Err(Error::NotAuthorized);
+        }
+
+        bump_instance_ttl(&env);
+        env.storage().instance().set(&DataKey::Paused, &false);
+
+        env.events()
+            .publish(("campaign_resumed", campaign_id, caller), ());
 
         Ok(())
     }
