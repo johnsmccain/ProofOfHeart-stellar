@@ -468,6 +468,18 @@ impl ProofOfHeart {
         let reserve_amount = (total_after_fee * (reserve_bps as i128)) / 10000;
         let creator_amount = total_after_fee - reserve_amount;
 
+        // Execute token transfers BEFORE marking campaign as withdrawn to prevent stuck state
+        let admin_addr = get_admin(&env);
+        let client = Self::token_client(&env);
+
+        client.transfer(&env.current_contract_address(), &admin_addr, &fee_amount);
+        client.transfer(
+            &env.current_contract_address(),
+            &campaign.creator,
+            &creator_amount,
+        );
+
+        // Update state only after successful external interactions
         campaign.funds_withdrawn = true;
         campaign.is_active = false;
         set_campaign(&env, campaign_id, &campaign);
@@ -490,16 +502,6 @@ impl ProofOfHeart {
 
         let total_raised = get_total_raised_global(&env);
         set_total_raised_global(&env, total_raised - campaign.amount_raised);
-
-        let admin_addr = get_admin(&env);
-        let client = Self::token_client(&env);
-
-        client.transfer(&env.current_contract_address(), &admin_addr, &fee_amount);
-        client.transfer(
-            &env.current_contract_address(),
-            &campaign.creator,
-            &creator_amount,
-        );
 
         env.events().publish(
             ("withdrawal", campaign_id, campaign.creator.clone()),
@@ -528,15 +530,17 @@ impl ProofOfHeart {
         let campaign = get_campaign_or_error(&env, campaign_id)?;
         campaign.creator.require_auth();
 
-        reserve.released = true;
-        set_campaign_reserve(&env, campaign_id, &reserve);
-
+        // Transfer funds BEFORE marking reserve as released to prevent stuck state
         let client = Self::token_client(&env);
         client.transfer(
             &env.current_contract_address(),
             &campaign.creator,
             &reserve.amount,
         );
+
+        // Update state only after successful external interaction
+        reserve.released = true;
+        set_campaign_reserve(&env, campaign_id, &reserve);
 
         env.events().publish(
             ("reserve_released", campaign_id, campaign.creator),
@@ -829,14 +833,17 @@ impl ProofOfHeart {
         }
 
         bump_instance_ttl(&env);
-        set_creator_revenue_claimed(&env, campaign_id, already_claimed + claimable);
 
+        // Transfer tokens BEFORE updating state to prevent balance wipe on failed transfer
         let client = Self::token_client(&env);
         client.transfer(
             &env.current_contract_address(),
             &campaign.creator,
             &claimable,
         );
+
+        // Update state only after successful external interaction
+        set_creator_revenue_claimed(&env, campaign_id, already_claimed + claimable);
 
         env.events().publish(
             ("creator_revenue_claimed", campaign_id, campaign.creator),
@@ -1624,14 +1631,27 @@ impl ProofOfHeart {
         campaigns
     }
 
+    /// Returns platform-wide aggregate statistics.
+    ///
+    /// # Performance Notes
+    /// This function scans campaigns sequentially. To prevent DoS, the scan is capped at
+    /// MAX_SCAN_LIMIT campaigns. For platforms with > MAX_SCAN_LIMIT campaigns, the
+    /// reported counts represent a partial snapshot of the most recent campaigns.
+    /// For accurate full statistics, consider implementing incremental counters that
+    /// update whenever campaign state changes (create, verify, cancel, etc.).
     pub fn get_platform_stats(env: Env) -> PlatformStats {
         let total_campaigns = get_campaign_count(&env);
         let mut active_campaigns = 0u32;
         let mut verified_campaigns = 0u32;
         let mut cancelled_campaigns = 0u32;
 
+        // Cap scan window to prevent DoS - scans most recent campaigns first
+        // (iteration order: 1, 2, 3, ... total_campaigns)
+        const MAX_SCAN_LIMIT: u32 = 1000;
+        let scan_end = total_campaigns.min(MAX_SCAN_LIMIT);
+
         let mut id = 1u32;
-        while id <= total_campaigns {
+        while id <= scan_end {
             if let Some(campaign) = get_campaign(&env, id) {
                 if campaign.is_active && !campaign.is_cancelled {
                     active_campaigns += 1;
